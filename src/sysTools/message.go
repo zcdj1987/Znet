@@ -1,4 +1,4 @@
-package tools
+package sysTools
 
 //gate服务器和game服务器之间通信的RPC消息
 type G2GMsg struct {

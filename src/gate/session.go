@@ -32,11 +32,11 @@ type Session struct {
 	e     *list.Element //链表指针
 
 	//session相关消息
-	coMsg   chan []byte //从conn中接受到的信息
-	reMsg   chan []byte // 返回给客户端的异步消息
-	sysMsg  chan []byte //转发送给Game服务器的消息
-	encoder *rc4.Cipher // 加密器
-	decoder *rc4.Cipher // 解密器
+	coMsg   chan []byte         //从conn中接受到的信息
+	reMsg   chan []tools.RpcMsg // 返回给客户端的异步消息
+	sysMsg  chan []byte         //转发送给Game服务器的消息
+	encoder *rc4.Cipher         // 加密器
+	decoder *rc4.Cipher         // 解密器
 
 	// 时间相关
 	ConnectTime    time.Time // TCP链接建立时间
