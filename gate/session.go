@@ -4,20 +4,10 @@ import (
 	"container/list"
 	"crypto/rc4"
 	"gate/tools"
-	"log"
+	log "github.com/sirupsen/logrus"
 	"net"
-	"sync"
-	"sync/atomic"
-
 	//"sync/atomic"
 	"time"
-)
-
-const (
-	SESSION_KEYEXCG    = 0x1 // 是否已经交换完毕KEY
-	SESSION_ENCRYPT    = 0x2 // 是否可以开始加密
-	SESSION_KICKED_OUT = 0x4 // 踢掉
-	SESSION_AUTHORIZED = 0x8 // 已授权访问
 )
 
 var GateSessionPool *SsPool //池
@@ -29,26 +19,24 @@ type SsPool struct {
 	freePool *list.List
 	//工作的session池
 	workPool *list.List
-	//锁
-	lock *sync.Mutex
 }
 
 type Session struct {
-	Id     int
-	Gid    int           // 游戏服ID;e.g.: game1,game2
-	UserId int64         // 玩家ID
-	e      *list.Element //链表指针
-	IP     net.IP
-	Conn   net.Conn
+	IsActive bool // 如果false，则不再收发消息，等待被回收
+	IP       net.IP
+	Conn     net.Conn
+	Die      chan bool // 会话关闭信号
 
-	CoMsg   chan []byte //从conn中接受到的信息
-	ReMsg   chan []byte // 返回给客户端的异步消息
-	GaMsg   chan []byte //转发送给Game服务器的消息
-	Encoder *rc4.Cipher // 加密器
-	Decoder *rc4.Cipher // 解密器
-	Die     chan bool   // 会话关闭信号
+	id    int
+	useId int64         // 玩家ID
+	e     *list.Element //链表指针
 
-	IsActive int32 // 状态标记在free池为0，在work池为1，如果session不再活动，则标记为0，等待回收
+	//session相关消息
+	coMsg   chan []byte //从conn中接受到的信息
+	reMsg   chan []byte // 返回给客户端的异步消息
+	sysMsg  chan []byte //转发送给Game服务器的消息
+	encoder *rc4.Cipher // 加密器
+	decoder *rc4.Cipher // 解密器
 
 	// 时间相关
 	ConnectTime    time.Time // TCP链接建立时间
@@ -57,14 +45,14 @@ type Session struct {
 
 	PacketCount     int // 对收到的包进行计数，避免恶意发包
 	PacketCount1Min int // 每分钟的包统计，用于RPM判断
+
+	only bool //唯一启动标记，表示start方法只能启动一次
 }
 
 //从缓存池获取一个session
 func (self *SsPool) GetS(ip net.IP, conn net.Conn) (_s *Session) {
-	self.lock.Lock()
-	defer self.lock.Unlock()
-
 	if self.freePool.Len() == 0 {
+		log.Warning("gate server is full:", GateId)
 		return
 	}
 	_e := self.freePool.Front()
@@ -79,15 +67,12 @@ func (self *SsPool) GetS(ip net.IP, conn net.Conn) (_s *Session) {
 
 //定时从work池中清理已经过期session回free池
 func (self *SsPool) CleanWP() {
-	self.lock.Lock()
-	defer self.lock.Unlock()
-
 	var _s *Session
 	var _next *list.Element
 	for _e := self.workPool.Front(); _e != nil; _e = _next {
 		_next = _e.Next()
 		_s = _e.Value.(*Session)
-		if atomic.LoadInt32(&_s.IsActive) == 0 {
+		if _s.IsActive {
 			self.workPool.Remove(_e)
 			self.freePool.PushBack(_s)
 			_s.Reset()
@@ -98,30 +83,22 @@ func (self *SsPool) CleanWP() {
 //Session方法
 func sessionNew() Session {
 	return Session{
-		ReMsg: make(chan []byte, 8),
-		GaMsg: make(chan []byte),
-		Die:   make(chan bool),
+		coMsg:  make(chan []byte, 8),
+		reMsg:  make(chan []byte, 8),
+		sysMsg: make(chan []byte),
+		Die:    make(chan bool),
 	}
-}
-
-//初始化session
-func (self *Session) Init(ip net.IP, conn net.Conn) {
-	self.IP = ip
-	self.Conn = conn
-	atomic.StoreInt32(&self.IsActive, 1)
 }
 
 //重置session
 func (self *Session) Reset() {
 	self.IP = nil
 	self.Conn = nil
-	self.Gid = 0
-	self.UserId = 0
-	self.Encoder = nil
-	self.Decoder = nil
+	self.useId = 0
+	self.encoder = nil
+	self.decoder = nil
 	self.PacketCount = 0
 	self.PacketCount1Min = 0
-
 	self.IsActive = false
 }
 
@@ -129,32 +106,41 @@ func (self *Session) Reset() {
 func (self *Session) Start() {
 	defer tools.PrintPanicStack()
 
+	if self.only {
+		return
+	}
+	self.only = true
+
 	var _cm, _rm, _gm []byte
 	var _ok bool
 	var err error
 	//创建加密解密
-	self.Encoder, err = rc4.NewCipher([]byte(tools.CONST_SOCKET_CRYPTO))
+	self.encoder, err = rc4.NewCipher([]byte(tools.CONST_SOCKET_CRYPTO))
 	if err != nil {
 		log.Panic("RC4 Crypto is wrong:", err)
 	}
-	self.Decoder, err = rc4.NewCipher([]byte(tools.CONST_SOCKET_CRYPTO))
+	self.decoder, err = rc4.NewCipher([]byte(tools.CONST_SOCKET_CRYPTO))
 	if err != nil {
 		log.Panic("RC4 Crypto is wrong:", err)
 	}
 	for {
 		select {
 		//从conn中接收消息
-		case _cm, _ok = <-self.CoMsg:
-			if !_ok {
-
+		case _cm = <-self.coMsg:
+			if self.IsActive {
+				//处理将消息封装之后，通过rpc发往game服
 			}
 		//从gate中接收返回消息
-		case _rm = <-self.ReMsg:
+		case _rm = <-self.reMsg:
 		//接受gameserver消息
-		case _gm = <-self.GaMsg:
-
+		case _gm = <-self.sysMsg:
+		case <-self.Die:
+			self.Reset()
 		}
 	}
+}
+func (self *Session) SignDie() {
+	self.Die <- true
 }
 
 func init() {
@@ -163,7 +149,6 @@ func init() {
 		wholePool: make(map[int]*Session),
 		freePool:  new(list.List),
 		workPool:  new(list.List),
-		lock:      new(sync.Mutex),
 	}
 	for i := 1; i <= tools.CONST_GATE_SSPOOL_MAXLEN; i++ {
 		_ss := sessionNew()

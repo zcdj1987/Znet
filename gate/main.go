@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"time"
 )
 
@@ -20,6 +21,8 @@ var GateId int
 
 func main() {
 	defer tools.PrintPanicStack()
+	//所有gate都是单进程服务器
+	runtime.GOMAXPROCS(1)
 	//启动初始化
 	flag.Parse()
 	if h {
@@ -68,6 +71,7 @@ func handleClient(conn net.Conn) {
 	ip := net.ParseIP(host)
 	log.Infof("new connection from:%v port:%v", host, port)
 
+	//从session池中获取一个缓存
 	sess = GateSessionPool.GetS(ip, conn)
 
 	//读取消息
